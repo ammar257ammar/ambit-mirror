@@ -1,5 +1,14 @@
 package ambit2.rest.substance.study;
 
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
+import java.sql.Connection;
+import java.sql.DriverManager;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 
 import net.idea.modbcum.i.IQueryRetrieval;
@@ -8,6 +17,10 @@ import net.idea.modbcum.i.processors.IProcessor;
 import net.idea.restnet.db.convertors.OutputWriterConvertor;
 import net.idea.restnet.i.freemarker.IFreeMarkerApplication;
 
+import org.dbunit.database.DatabaseConfig;
+import org.dbunit.database.DatabaseConnection;
+import org.dbunit.database.IDatabaseConnection;
+import org.dbunit.ext.mysql.MySqlDataTypeFactory;
 import org.restlet.Context;
 import org.restlet.Request;
 import org.restlet.Response;
@@ -17,15 +30,34 @@ import org.restlet.data.Reference;
 import org.restlet.data.Status;
 import org.restlet.representation.Representation;
 import org.restlet.representation.Variant;
+import org.restlet.resource.ClientResource;
 import org.restlet.resource.ResourceException;
 
+import com.fasterxml.jackson.annotation.JsonInclude;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.SerializationFeature;
+
+import ambit2.base.config.AMBITConfigProperties;
+import ambit2.base.config.Preferences;
+import ambit2.base.data.SubstanceRecord;
 import ambit2.base.data.study.EffectRecord;
+import ambit2.base.data.study.IParams;
 import ambit2.base.data.study.Protocol;
 import ambit2.base.data.study.ProtocolApplication;
+import ambit2.db.search.QueryExecutor;
+import ambit2.db.substance.ReadSubstance;
+import ambit2.db.substance.ReadSubstances;
 import ambit2.db.substance.study.ReadSubstanceStudy;
+import ambit2.db.substance.study.ReadSubstanceStudyFlat;
+import ambit2.rest.DBConnection;
 import ambit2.rest.OpenTox;
 import ambit2.rest.query.QueryResource;
 import ambit2.rest.substance.SubstanceResource;
+import ambit2.rest.substance.study.jsonld.EffectRecordJsonldEntity;
+import ambit2.rest.substance.study.jsonld.SubstanceStudyJsonldEntity;
+import ioinformarics.oss.jackson.module.jsonld.JsonldModule;
+import ioinformarics.oss.jackson.module.jsonld.JsonldResource;
 
 public class SubstanceStudyResource<Q extends IQueryRetrieval<ProtocolApplication>> extends QueryResource<Q,ProtocolApplication> { 
 
@@ -132,6 +164,130 @@ public class SubstanceStudyResource<Q extends IQueryRetrieval<ProtocolApplicatio
 	public void configureTemplateMap(Map<String, Object> map, Request request,
 			IFreeMarkerApplication app) {
 		super.configureTemplateMap(map, request, app);
+		
+		map.put("jsonld", getJsonLd());
 		map.put("substanceUUID", substanceUUID);
+	}
+	
+	public String getJsonLd() {
+
+		String jsonld = "";
+
+		String datasetId = "";
+		String citation = "The eNanoMapper database for nanomaterial safety information doi:10.3762/bjnano.6.165";
+		String url = getRequest().getRootRef().toString();
+
+		Map<String, EffectRecord<String, IParams, String>> effectsMap = new HashMap<String, EffectRecord<String, IParams, String>>();
+
+		List<EffectRecordJsonldEntity> effectsList = new ArrayList<EffectRecordJsonldEntity>();
+
+		Connection c = null;
+		ResultSet rs = null;
+		QueryExecutor executor = null;
+
+		try {
+
+			DBConnection dbc = new DBConnection(getContext());
+			c = dbc.getConnection(30, true, 5);
+
+			ReadSubstanceStudyFlat q = new ReadSubstanceStudyFlat();
+			SubstanceRecord r = new SubstanceRecord();
+			r.setSubstanceUUID(substanceUUID);
+			q.setFieldname(r);
+			q.setRecord(new ArrayList<ProtocolApplication>());
+
+			executor = new QueryExecutor();
+			executor.setConnection(c);
+			executor.open();
+			rs = executor.process(q);
+
+			while (rs.next()) {
+
+				List<ProtocolApplication> protocolApps = q.getObject(rs);
+
+				for (ProtocolApplication<Protocol, IParams, String, IParams, String> m : protocolApps) {
+
+					datasetId = m.getCompanyUUID();
+
+					for (EffectRecord<String, IParams, String> effect : m.getEffects()) {
+						effectsMap.put(effect.getEndpoint(), effect);
+					}
+				}
+			}
+
+		} catch (Exception ex) {
+			ex.printStackTrace();
+		} finally {
+			if (rs != null) {
+				try {
+					rs.close();
+					executor.close();
+					c.close();
+				} catch (Exception e) {
+					e.printStackTrace();
+				}
+			}
+		}
+
+		for (Map.Entry<String, EffectRecord<String, IParams, String>> entry : effectsMap.entrySet()) {
+
+			String name = entry.getKey().toLowerCase();
+
+			if (name.contains("core size")) {
+
+				if(!effectsList.stream().anyMatch(o -> o.getName().equals("Size"))){
+					effectsList.add(getEffectRecordEntity("Size", entry.getValue()));					
+				}
+				
+			} else if (name.contains("specific surface area")) {
+
+				if(!effectsList.stream().anyMatch(o -> o.getName().equals("Specific surface area"))){
+					effectsList.add(getEffectRecordEntity("Specific surface area", entry.getValue()));					
+				}
+				
+			} else if (name.contains("circularity") || name.contains("aspect ratio") || name.contains("roundness")) {
+
+				if(!effectsList.stream().anyMatch(o -> o.getName().equals("Shape"))){
+					effectsList.add(getEffectRecordEntity("Shape", entry.getValue()));					
+				}
+
+			} else if (name.contains("zeta potential")) {
+
+				if(!effectsList.stream().anyMatch(o -> o.getName().equals("Zeta potential"))){
+					effectsList.add(getEffectRecordEntity("Zeta potential", entry.getValue()));					
+				}
+			}
+		}
+
+		SubstanceStudyJsonldEntity studyEntity = new SubstanceStudyJsonldEntity();
+		studyEntity.setDatasetId(datasetId);
+		studyEntity.setCitation(citation);
+		studyEntity.setUrl(url);
+		studyEntity.setVariableMeasured(effectsList);
+
+		ObjectMapper objectMapper = new ObjectMapper();
+		objectMapper.registerModule(new JsonldModule());
+    	objectMapper.configure(SerializationFeature.INDENT_OUTPUT, true);
+    	objectMapper.setSerializationInclusion(JsonInclude.Include.NON_NULL);
+
+		try {
+			jsonld = objectMapper.writeValueAsString(JsonldResource.Builder.create().build(studyEntity));
+		} catch (JsonProcessingException e) {
+			e.printStackTrace();
+		}
+
+		return jsonld;
+	}
+
+	public EffectRecordJsonldEntity getEffectRecordEntity(String name, EffectRecord<String, IParams, String> effect) {
+
+		EffectRecordJsonldEntity effectEntity = new EffectRecordJsonldEntity();
+		effectEntity.setName(name);
+
+		if (effect.getUnit() != null && !effect.getUnit().trim().equals("")) {
+			effectEntity.setUnitText("reported");
+		}
+
+		return effectEntity;
 	}
 }

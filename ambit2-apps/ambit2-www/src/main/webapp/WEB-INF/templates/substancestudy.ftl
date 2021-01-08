@@ -74,6 +74,9 @@
 </head>
 <body>
 
+<script type="application/ld+json">
+${jsonld}
+</script>
 
 <div class="container" style="margin:0;padding:0;">
 <!-- banner -->
