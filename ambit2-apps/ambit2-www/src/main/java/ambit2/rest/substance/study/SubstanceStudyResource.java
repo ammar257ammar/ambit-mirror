@@ -210,7 +210,9 @@ public class SubstanceStudyResource<Q extends IQueryRetrieval<ProtocolApplicatio
 					datasetId = m.getCompanyUUID();
 
 					for (EffectRecord<String, IParams, String> effect : m.getEffects()) {
-						effectsMap.put(effect.getEndpoint(), effect);
+						if(effect.getEndpoint() != null && !effect.getEndpoint().equals("")){
+							effectsMap.put(effect.getEndpoint(), effect);
+						}
 					}
 				}
 			}
